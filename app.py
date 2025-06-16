@@ -1,13 +1,9 @@
 import os
 import io
 import datetime
-import json
 import streamlit as st
 import google.generativeai as genai
 from google.oauth2 import service_account
-from google.auth.transport.requests import Request
-from google.oauth2.credentials import Credentials
-from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 from googleapiclient.http import MediaIoBaseUpload, MediaIoBaseDownload
@@ -18,54 +14,33 @@ from gtts import gTTS
 DRIVE_FILE_NAME = "notes_git_data.txt"
 SCOPES = ["https://www.googleapis.com/auth/drive"]
 
-# --- INTELIGENTNA FUNKCJA LOGOWANIA (działa lokalnie i w chmurze) ---
+# --- OSTATECZNA FUNKCJA LOGOWANIA DLA "ROBOTA" ---
 @st.cache_resource
 def get_drive_service():
-    # Metoda dla wdrożonej aplikacji w Streamlit Cloud (używa Secrets)
-    if hasattr(st, 'secrets') and "gcp_service_account" in st.secrets:
-        try:
-            creds_info = dict(st.secrets.gcp_service_account)
-            # Poniższa linijka jest kluczowa dla poprawnego formatowania klucza w chmurze
-            creds_info['private_key'] = creds_info['private_key'].replace('\\n', '\n')
-            creds = service_account.Credentials.from_service_account_info(creds_info, scopes=SCOPES)
-            service = build("drive", "v3", credentials=creds)
-            return service
-        except Exception as e:
-            st.error(f"Błąd logowania przez Service Account: {e}")
-            return None
-    # Metoda dla lokalnego komputera (używa plików .json)
-    else:
-        creds = None
-        if os.path.exists("token.json"):
-            creds = Credentials.from_authorized_user_file("token.json", SCOPES)
-        if not creds or not creds.valid:
-            if creds and creds.expired and creds.refresh_token:
-                creds.refresh(Request())
-            else:
-                flow = InstalledAppFlow.from_client_secrets_file("credentials.json", SCOPES)
-                creds = flow.run_local_server(port=0)
-            with open("token.json", "w") as token:
-                token.write(creds.to_json())
-        try:
-            service = build("drive", "v3", credentials=creds)
-            return service
-        except Exception as e:
-            st.error(f"Błąd logowania lokalnego: {e}")
-            return None
-
-# --- Funkcja do zamiany tekstu na mowę ---
-def text_to_audio(text):
     try:
-        tts = gTTS(text=text, lang='pl')
-        audio_fp = io.BytesIO()
-        tts.write_to_fp(audio_fp)
-        audio_fp.seek(0)
-        return audio_fp
+        # Tworzymy słownik z danych logowania, pobierając każdą wartość osobno z sekretów
+        creds_info = {
+            "type": st.secrets.gcp_service_account.type,
+            "project_id": st.secrets.gcp_service_account.project_id,
+            "private_key_id": st.secrets.gcp_service_account.private_key_id,
+            "private_key": st.secrets.gcp_service_account.private_key.replace('\\n', '\n'),
+            "client_email": st.secrets.gcp_service_account.client_email,
+            "client_id": st.secrets.gcp_service_account.client_id,
+            "auth_uri": st.secrets.gcp_service_account.auth_uri,
+            "token_uri": st.secrets.gcp_service_account.token_uri,
+            "auth_provider_x509_cert_url": st.secrets.gcp_service_account.auth_provider_x509_cert_url,
+            "client_x509_cert_url": st.secrets.gcp_service_account.client_x509_cert_url,
+            "universe_domain": st.secrets.gcp_service_account.universe_domain
+        }
+        creds = service_account.Credentials.from_service_account_info(creds_info, scopes=SCOPES)
+        service = build("drive", "v3", credentials=creds)
+        return service
     except Exception as e:
-        print(f"Błąd gTTS: {e}")
+        st.error(f"Błąd logowania przez Service Account: {e}")
+        st.error("Upewnij się, że wszystkie 11 pól w [gcp_service_account] w 'Secrets' jest poprawnie wklejonych.")
         return None
-        
-# Reszta funkcji do obsługi plików
+
+# Reszta funkcji bez zmian...
 def get_file_id(service, file_name):
     query = f"name='{file_name}' and trashed=false"
     response = service.files().list(q=query, spaces='drive', fields='files(id, name)').execute()
@@ -96,23 +71,28 @@ def upload_notes(service, file_id, file_name, new_note_content):
         response = service.files().create(body=file_metadata, media_body=media, fields='id').execute()
         st.session_state.file_id = response.get('id')
 
+def text_to_audio(text):
+    try:
+        tts = gTTS(text=text, lang='pl')
+        audio_fp = io.BytesIO()
+        tts.write_to_fp(audio_fp)
+        audio_fp.seek(0)
+        return audio_fp
+    except Exception as e:
+        print(f"Błąd gTTS: {e}")
+        return None
+
 # --- Główna logika aplikacji Streamlit ---
 st.set_page_config(page_title="Notes Git", page_icon="📝")
 st.title("📝 Notes Git")
 st.caption("Twój inteligentny pamiętnik zasilany przez AI.")
 
-# Inteligentne ładowanie klucza Gemini
 try:
-    api_key = st.secrets.get("GEMINI_API_KEY") if hasattr(st, 'secrets') and "GEMINI_API_KEY" in st.secrets else os.environ.get('GEMINI_API_KEY')
-    if not api_key:
-        st.error("Błąd: Nie znaleziono klucza GEMINI_API_KEY. Ustaw go w Secrets (dla wersji online) lub jako zmienną środowiskową (dla wersji lokalnej).")
-        st.stop()
-    genai.configure(api_key=api_key)
+    genai.configure(api_key=st.secrets.GEMINI_API_KEY)
 except Exception as e:
     st.error(f"Błąd konfiguracji Gemini API: {e}")
     st.stop()
 
-# Inicjalizacja usług
 drive_service = get_drive_service()
 if not drive_service:
     st.stop()
@@ -124,7 +104,6 @@ if "file_id" not in st.session_state:
 st.success("Połączono z Twoim prywatnym archiwum na Dysku Google.")
 model = genai.GenerativeModel('gemini-1.5-flash')
 
-# Funkcja do obsługi prompta
 def handle_prompt(prompt_text):
     with st.chat_message("user"):
         st.markdown(prompt_text)
@@ -142,7 +121,7 @@ def handle_prompt(prompt_text):
             else:
                 notes_content = ""
                 if st.session_state.get("file_id"):
-                    notes_content = download_notes(drive_service, st.session_state.file_id)
+                    notes_content = download_notes(drive_service, st.session_state.get("file_id"))
                 if not notes_content.strip():
                     response_text = "Twoje archiwum jest jeszcze puste. Zapisz pierwszą notatkę!"
                 else:
@@ -152,13 +131,12 @@ def handle_prompt(prompt_text):
                     )
                     response = model.generate_content(system_prompt)
                     response_text = response.text
-            
+
             st.markdown(response_text)
             sound_file = text_to_audio(response_text)
             if sound_file:
                 st.audio(sound_file, autoplay=True)
 
-# Sekcja nagrywania głosu
 st.write("Naciśnij i mów, aby dodać notatkę głosową lub zadać pytanie:")
 audio_data = mic_recorder(start_prompt="▶️ Mów", stop_prompt="⏹️ Stop", just_once=True, key='mic1')
 
@@ -169,6 +147,5 @@ if audio_data and audio_data['bytes']:
         prompt_from_voice = genai.GenerativeModel('gemini-1.5-flash').generate_content(["Zamień tę mowę na tekst: ", audio_file]).text
         handle_prompt(prompt_from_voice)
 
-# Pole do wpisywania tekstu
 if prompt_from_text := st.chat_input("...lub napisz tutaj"):
     handle_prompt(prompt_from_text)
